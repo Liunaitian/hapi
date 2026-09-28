@@ -11,6 +11,8 @@ import type { PermissionMode } from './types';
 import { createKimiBackend } from './utils/kimiBackend';
 import { KimiPermissionHandler } from './utils/permissionHandler';
 import { resolveKimiRuntimeConfig } from './utils/config';
+import { KimiReplayCapture, type ReplayedKimiMessage } from './kimiReplayCapture';
+import { importReplayedHistory, storedMessageKey } from './kimiHistoryImport';
 class KimiRemoteLauncher extends RemoteLauncherBase {
     private readonly session: KimiSession;
     private readonly model?: string;
@@ -68,12 +70,22 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
         const acpMcpServers = toAcpMcpServers(mcpServers);
         let acpSessionId: string;
         if (resumeSessionId) {
+            // kimi-code answers session/load by replaying the full conversation
+            // as session/update notifications. Capture them through the backend's
+            // replay hook (installed only for the load, while no prompt handler
+            // exists) so the hub row gains the prior history instead of showing
+            // a blank phone view.
+            const replayCapture = new KimiReplayCapture(this.model ?? null);
+            backend.setReplayHandler((update) => replayCapture.handleUpdate(update));
+            let loaded = false;
             try {
                 acpSessionId = await backend.loadSession({
                     sessionId: resumeSessionId,
                     cwd: session.path,
                     mcpServers: acpMcpServers
                 });
+                await backend.drainSessionUpdates();
+                loaded = true;
             } catch (error) {
                 logger.warn('[kimi-remote] resume failed, starting new session', error);
                 session.sendSessionEvent({
@@ -84,6 +96,11 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
                     cwd: session.path,
                     mcpServers: acpMcpServers
                 });
+            } finally {
+                backend.setReplayHandler(null);
+            }
+            if (loaded) {
+                await this.importReplayedHistory(replayCapture.drain());
             }
         } else {
             acpSessionId = await backend.newSession({
@@ -219,6 +236,55 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
             this.happyServer.stop();
             this.happyServer = null;
         }
+    }
+
+    private async importReplayedHistory(items: ReplayedKimiMessage[]): Promise<void> {
+        if (items.length === 0) {
+            return;
+        }
+        const session = this.session;
+        let existingKeys: Set<string>;
+        try {
+            existingKeys = await this.fetchExistingHistoryKeys();
+        } catch (error) {
+            // Without the stored history we cannot dedup; importing anyway
+            // would duplicate every message the row already has. Skipping the
+            // import keeps the pre-fix behavior for this failure mode.
+            logger.warn('[kimi-remote] Could not fetch stored history; skipping replay import', error);
+            return;
+        }
+        const result = importReplayedHistory({
+            items,
+            existingKeys,
+            sendUserMessage: (text) => session.sendUserMessage(text),
+            sendAgentMessage: (message) => session.sendAgentMessage(message)
+        });
+        logger.debug(`[kimi-remote] Imported ${result.imported} replayed message(s), skipped ${result.skipped} duplicate(s)`);
+    }
+
+    private async fetchExistingHistoryKeys(): Promise<Set<string>> {
+        const keys = new Set<string>();
+        const session = this.session;
+        let cursor = 0;
+        const limit = 200;
+        while (true) {
+            const messages = await session.api.getSessionMessages(session.client.sessionId, {
+                afterSeq: cursor,
+                limit
+            });
+            for (const message of messages) {
+                const key = storedMessageKey(message.content);
+                if (key !== null) {
+                    keys.add(key);
+                }
+            }
+            const maxSeq = messages.reduce((max, message) => Math.max(max, message.seq), cursor);
+            if (messages.length < limit || maxSeq <= cursor) {
+                break;
+            }
+            cursor = maxSeq;
+        }
+        return keys;
     }
 
     private handleAgentMessage(message: AgentMessage): void {

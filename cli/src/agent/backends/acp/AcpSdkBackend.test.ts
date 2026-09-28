@@ -1865,3 +1865,81 @@ describe('AcpSdkBackend abortSoftSteers', () => {
         expect(backend.processingMessage).toBe(false);
     });
 });
+
+describe('AcpSdkBackend replay handler', () => {
+    it('routes session updates to the replay handler while no prompt is active', async () => {
+        const backend = new AcpSdkBackend({ command: 'kimi' });
+        const replayed: unknown[] = [];
+        backend.setReplayHandler((update) => {
+            replayed.push(update);
+        });
+
+        const backendInternal = backend as unknown as {
+            handleSessionUpdate: (params: unknown) => void;
+        };
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'replayed user message' }
+            }
+        });
+        await backend.drainSessionUpdates();
+
+        expect(replayed).toEqual([{
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'replayed user message' }
+        }]);
+    });
+
+    it('drops updates again after the replay handler is removed', async () => {
+        const backend = new AcpSdkBackend({ command: 'kimi' });
+        const replayed: unknown[] = [];
+        backend.setReplayHandler((update) => {
+            replayed.push(update);
+        });
+        backend.setReplayHandler(null);
+
+        const backendInternal = backend as unknown as {
+            handleSessionUpdate: (params: unknown) => void;
+        };
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'dropped' }
+            }
+        });
+        await backend.drainSessionUpdates();
+
+        expect(replayed).toEqual([]);
+    });
+
+    it('prefers the prompt handler over the replay handler', async () => {
+        const backend = new AcpSdkBackend({ command: 'kimi' });
+        const replayed: unknown[] = [];
+        backend.setReplayHandler((update) => {
+            replayed.push(update);
+        });
+
+        const promptUpdates: unknown[] = [];
+        const handler = new AcpMessageHandler((message) => promptUpdates.push(message));
+        const backendInternal = backend as unknown as {
+            messageHandler: AcpMessageHandler | null;
+            handleSessionUpdate: (params: unknown) => void;
+        };
+        backendInternal.messageHandler = handler;
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'live answer' }
+            }
+        });
+        await backend.drainSessionUpdates();
+        handler.drainBuffers();
+
+        expect(replayed).toEqual([]);
+        expect(promptUpdates).toEqual([{ type: 'text', text: 'live answer' }]);
+    });
+});

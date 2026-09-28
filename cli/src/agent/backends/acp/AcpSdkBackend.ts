@@ -72,6 +72,15 @@ export class AcpSdkBackend implements AgentBackend {
     private readonly sessionAvailableCommands = new Map<string, Set<string>>();
     private autoPermissionModeEnabled: boolean | null = null;
     private messageHandler: AcpMessageHandler | null = null;
+    /**
+     * Optional hook for session updates arriving while no prompt handler is
+     * installed — primarily the full-history replay emitted by ACP
+     * `session/load` (kimi-code resends the whole conversation as
+     * session/update notifications). Default null: such updates are dropped,
+     * exactly as before. Flavors that import replayed history install a
+     * handler around their loadSession call and remove it afterwards.
+     */
+    private replayHandler: ((update: unknown, sessionId: string | null) => void | Promise<void>) | null = null;
     private activeSessionId: string | null = null;
     private initializeResult: AcpInitializeResult | null = null;
     private initializeInFlight: Promise<void> | null = null;
@@ -519,6 +528,22 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     /**
+     * Installs a handler for session updates received while no prompt is
+     * active (messageHandler === null) — used to capture the history replay
+     * emitted during ACP `session/load`. Pass null to remove. Updates are
+     * delivered in arrival order on the session update queue; await
+     * `drainSessionUpdates()` after loadSession before draining the capture.
+     */
+    setReplayHandler(handler: ((update: unknown, sessionId: string | null) => void | Promise<void>) | null): void {
+        this.replayHandler = handler;
+    }
+
+    /** Resolves once every session update queued so far has been processed. */
+    async drainSessionUpdates(): Promise<void> {
+        await this.sessionUpdateQueue;
+    }
+
+    /**
      * Called when ACP reports foreground state / permission for harness wake (#1470 / #1502).
      * `true` = sustained `running` (debounced), `requires_action`, or permission.
      * `false` = `state_update` idle (skipped while a HAPI prompt turn is still draining).
@@ -923,6 +948,7 @@ export class AcpSdkBackend implements AgentBackend {
         await this.sessionUpdateQueue;
         this.messageHandler?.drainBuffers();
         this.messageHandler = null;
+        this.replayHandler = null;
         this.activeSessionId = null;
         this.activePromptRequests = 0;
         this.foregroundPromptRequests = 0;
@@ -957,9 +983,16 @@ export class AcpSdkBackend implements AgentBackend {
         // update into the restored handler if earlier async image work kept
         // the queue busy past restore.
         const handler = this.messageHandler;
+        // Same capture-at-enqueue rationale for the replay hook: it is only
+        // consulted while no prompt handler exists (e.g. during session/load).
+        const replayHandler = handler === null ? this.replayHandler : null;
         this.sessionUpdateQueue = this.sessionUpdateQueue
             .then(async () => {
-                await handler?.handleUpdate(update);
+                if (handler !== null) {
+                    await handler.handleUpdate(update);
+                } else if (replayHandler !== null) {
+                    await replayHandler(update, sessionId);
+                }
             })
             .catch((error) => {
                 logger.debug(

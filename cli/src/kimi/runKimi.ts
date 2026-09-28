@@ -1,4 +1,7 @@
 import { logger } from '@/ui/logger';
+import { ApiClient } from '@/api/api';
+import { readSettings } from '@/persistence';
+import { findKimiResumeTargetSessionId } from './kimiResumeLookup';
 import { kimiLoop } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
@@ -47,21 +50,54 @@ export async function runKimi(opts: {
         ? undefined
         : runtimeConfig.model;
 
-    const bootstrap = opts.existingSessionId
-        ? await bootstrapExistingSession({
-            sessionId: opts.existingSessionId,
-            flavor: 'kimi',
-            startedBy,
-            workingDirectory
-        })
-        : await bootstrapSession({
-            flavor: 'kimi',
-            startedBy,
-            workingDirectory,
-            agentState: initialState,
-            model: persistedModel,
-            reservedSessionId: opts.reservedSessionId
+    // `hapi kimi --resume <kimiSessionId>` used to mint a fresh hub row with a
+    // random tag, leaving the phone view blank and duplicating the session.
+    // When no explicit hub session was passed, adopt the existing hub row that
+    // already tracks this kimi session so history continues in place.
+    let existingSessionId = opts.existingSessionId;
+    if (!existingSessionId && opts.resumeSessionId) {
+        const lookupApi = await ApiClient.create();
+        const settings = await readSettings();
+        existingSessionId = await findKimiResumeTargetSessionId(lookupApi, {
+            resumeSessionId: opts.resumeSessionId,
+            machineId: settings?.machineId
         });
+        if (existingSessionId) {
+            logger.debug(`[kimi] Adopting existing hub session ${existingSessionId} for kimi session ${opts.resumeSessionId}`);
+        }
+    }
+
+    const bootstrapFresh = () => bootstrapSession({
+        flavor: 'kimi',
+        startedBy,
+        workingDirectory,
+        agentState: initialState,
+        model: persistedModel,
+        reservedSessionId: opts.reservedSessionId
+    });
+
+    let bootstrap;
+    if (existingSessionId) {
+        try {
+            bootstrap = await bootstrapExistingSession({
+                sessionId: existingSessionId,
+                flavor: 'kimi',
+                startedBy,
+                workingDirectory
+            });
+        } catch (error) {
+            // An explicit --existing-session-id must fail loudly (e.g.
+            // hub-archived rows); an adopted row falls back to a fresh
+            // bootstrap, which is the pre-adoption behavior for that row.
+            if (opts.existingSessionId) {
+                throw error;
+            }
+            logger.warn('[kimi] Failed to adopt existing hub session; creating a new one', error);
+            bootstrap = await bootstrapFresh();
+        }
+    } else {
+        bootstrap = await bootstrapFresh();
+    }
     const { api, session } = bootstrap;
 
     const startingMode: 'local' | 'remote' = opts.startingMode
