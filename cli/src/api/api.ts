@@ -1,10 +1,11 @@
 import axios from 'axios'
-import type { AgentState, ClearOpencodeSessionCallbackRequest, ClearOpencodeSessionResponse, CreateMachineResponse, CreateSessionResponse, RunnerState, Machine, MachineMetadata, Metadata, Session } from '@/api/types'
+import type { AgentState, ClearOpencodeSessionCallbackRequest, ClearOpencodeSessionResponse, CliMessagesResponse, CreateMachineResponse, CreateSessionResponse, RunnerState, Machine, MachineMetadata, Metadata, Session } from '@/api/types'
 import { applyHubSessionSummaryContract } from '@/modules/common/sessionSummaryInstruction'
 import type { LocalResumeTarget, ResumableSession } from '@hapi/protocol'
 import {
     AgentStateSchema,
     ClearOpencodeSessionResponseSchema,
+    CliMessagesResponseSchema,
     CreateMachineResponseSchema,
     CreateSessionResponseSchema,
     GetSessionResponseSchema,
@@ -182,6 +183,31 @@ export class ApiClient {
             permissionMode: raw.permissionMode,
             collaborationMode: raw.collaborationMode
         }
+    }
+
+    /**
+     * Fetches stored messages for a session row (REST mirror of the /cli
+     * socket history). Used by resume-time history import to dedup replayed
+     * messages against what the row already has.
+     */
+    async getSessionMessages(
+        sessionId: string,
+        opts?: { afterSeq?: number; limit?: number }
+    ): Promise<CliMessagesResponse['messages']> {
+        const response = await axios.get(
+            `${configuration.apiUrl}/cli/sessions/${encodeURIComponent(sessionId)}/messages`,
+            {
+                params: { afterSeq: opts?.afterSeq ?? 0, limit: opts?.limit ?? 200 },
+                headers: this.authHeaders(),
+                timeout: 60_000
+            }
+        )
+
+        const parsed = CliMessagesResponseSchema.safeParse(response.data)
+        if (!parsed.success) {
+            throw apiValidationError('Invalid /cli/sessions/:id/messages response', response)
+        }
+        return parsed.data.messages
     }
 
     async getOrCreateMachine(opts: {

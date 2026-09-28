@@ -4,11 +4,26 @@ const harness = vi.hoisted(() => ({
     order: [] as string[],
     registered: [] as Array<{ manager: unknown; getCwd: () => string }>,
     loopOptions: null as Record<string, unknown> | null,
+    bootstrapCalls: [] as Array<{ fn: string; sessionId?: string }>,
+    resumable: [] as Array<Record<string, unknown>>,
     createSession: () => ({
         rpcHandlerManager: { registerHandler: vi.fn() },
         onUserMessage: vi.fn(),
         onCancelQueuedMessage: vi.fn()
     })
+}))
+
+vi.mock('@/api/api', () => ({
+    ApiClient: {
+        create: async () => ({
+            listResumableSessions: async () => harness.resumable
+        })
+    }
+}))
+
+vi.mock('@/persistence', async (importOriginal) => ({
+    ...(await importOriginal<Record<string, unknown>>()),
+    readSettings: async () => ({ machineId: 'machine-1' })
 }))
 
 vi.mock('@/modules/common/handlers/kimiModels', () => ({
@@ -21,6 +36,7 @@ vi.mock('@/modules/common/handlers/kimiModels', () => ({
 vi.mock('@/agent/sessionFactory', () => ({
     bootstrapSession: async () => {
         harness.order.push('bootstrap')
+        harness.bootstrapCalls.push({ fn: 'bootstrapSession' })
         return {
             api: {},
             session: harness.createSession(),
@@ -31,8 +47,9 @@ vi.mock('@/agent/sessionFactory', () => ({
             workingDirectory: '/work/project'
         }
     },
-    bootstrapExistingSession: async () => {
+    bootstrapExistingSession: async (options: { sessionId: string }) => {
         harness.order.push('bootstrap')
+        harness.bootstrapCalls.push({ fn: 'bootstrapExistingSession', sessionId: options.sessionId })
         return {
             api: {},
             session: harness.createSession(),
@@ -77,11 +94,17 @@ vi.mock('./utils/config', () => ({
 
 import { runKimi } from './runKimi'
 
+function resetHarness() {
+    harness.order = []
+    harness.registered = []
+    harness.loopOptions = null
+    harness.bootstrapCalls = []
+    harness.resumable = []
+}
+
 describe('runKimi session model discovery', () => {
     it('registers the session catalog before the local/remote loop starts', async () => {
-        harness.order = []
-        harness.registered = []
-        harness.loopOptions = null
+        resetHarness()
 
         await runKimi({ workingDirectory: '/work/project', startingMode: 'local' })
 
@@ -92,14 +115,65 @@ describe('runKimi session model discovery', () => {
     })
 
     it('probes the working directory the session was started in', async () => {
-        harness.order = []
-        harness.registered = []
-        harness.loopOptions = null
+        resetHarness()
 
         await runKimi({ workingDirectory: '/work/other-project', startingMode: 'local' })
 
         const loopOptions = harness.loopOptions as Record<string, unknown> | null
         expect(harness.registered[0]?.getCwd()).toBe('/work/other-project')
         expect(loopOptions?.path).toBe('/work/other-project')
+    })
+})
+
+describe('runKimi --resume hub row adoption', () => {
+    it('adopts the existing hub row whose kimiSessionId matches', async () => {
+        resetHarness()
+        harness.resumable = [{
+            sessionId: 'hub-existing',
+            flavor: 'kimi',
+            directory: '/work/project',
+            machineId: 'machine-1',
+            active: false,
+            thinking: false,
+            controlledByUser: false,
+            agentSessionId: 'kimi-session-1',
+            updatedAt: 1000
+        }]
+
+        await runKimi({ workingDirectory: '/work/project', resumeSessionId: 'kimi-session-1' })
+
+        expect(harness.bootstrapCalls).toEqual([{ fn: 'bootstrapExistingSession', sessionId: 'hub-existing' }])
+        expect(harness.loopOptions?.resumeSessionId).toBe('kimi-session-1')
+    })
+
+    it('creates a fresh hub row when no existing session matches', async () => {
+        resetHarness()
+
+        await runKimi({ workingDirectory: '/work/project', resumeSessionId: 'kimi-session-1' })
+
+        expect(harness.bootstrapCalls).toEqual([{ fn: 'bootstrapSession' }])
+        expect(harness.loopOptions?.resumeSessionId).toBe('kimi-session-1')
+    })
+
+    it('does not look up a row when --existing-session-id was passed explicitly', async () => {
+        resetHarness()
+        harness.resumable = [{
+            sessionId: 'hub-other',
+            flavor: 'kimi',
+            directory: '/work/project',
+            active: false,
+            thinking: false,
+            controlledByUser: false,
+            agentSessionId: 'kimi-session-1',
+            updatedAt: 1000
+        }]
+
+        await runKimi({
+            workingDirectory: '/work/project',
+            resumeSessionId: 'kimi-session-1',
+            existingSessionId: 'hub-explicit'
+        })
+
+        expect(harness.bootstrapCalls).toEqual([{ fn: 'bootstrapExistingSession', sessionId: 'hub-explicit' }])
     })
 })
