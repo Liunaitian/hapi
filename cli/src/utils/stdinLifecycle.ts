@@ -21,7 +21,10 @@ export function releaseStdinForChild(): void {
         process.stdin.pause();
     } catch {
     }
-    if (process.stdin.destroyed) {
+    // Destroying is only needed for a TTY (Bun's stale pending read). For
+    // piped stdin, destroy() would close fd 0 and starve a child spawned
+    // with stdio:'inherit'; pause() is sufficient there.
+    if (process.stdin.destroyed || !process.stdin.isTTY) {
         return;
     }
     try {

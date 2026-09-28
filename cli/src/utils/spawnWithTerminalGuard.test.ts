@@ -31,9 +31,17 @@ describe('spawnWithTerminalGuard', () => {
     let stdinResumeSpy: ReturnType<typeof vi.spyOn>;
     let stdinDestroySpy: ReturnType<typeof vi.spyOn>;
     let destroyedDescriptor: PropertyDescriptor | undefined;
+    let isTTYDescriptor: PropertyDescriptor | undefined;
 
     const setStdinDestroyed = (value: boolean) => {
         Object.defineProperty(process.stdin, 'destroyed', {
+            configurable: true,
+            get: () => value
+        });
+    };
+
+    const setStdinIsTTY = (value: boolean | undefined) => {
+        Object.defineProperty(process.stdin, 'isTTY', {
             configurable: true,
             get: () => value
         });
@@ -45,7 +53,9 @@ describe('spawnWithTerminalGuard', () => {
         stdinResumeSpy = vi.spyOn(process.stdin, 'resume').mockImplementation(() => process.stdin);
         stdinDestroySpy = vi.spyOn(process.stdin, 'destroy').mockImplementation(() => process.stdin);
         destroyedDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'destroyed');
+        isTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
         setStdinDestroyed(false);
+        setStdinIsTTY(true);
     });
 
     afterEach(() => {
@@ -56,6 +66,11 @@ describe('spawnWithTerminalGuard', () => {
             Object.defineProperty(process.stdin, 'destroyed', destroyedDescriptor);
         } else {
             delete (process.stdin as unknown as { destroyed?: unknown }).destroyed;
+        }
+        if (isTTYDescriptor) {
+            Object.defineProperty(process.stdin, 'isTTY', isTTYDescriptor);
+        } else {
+            delete (process.stdin as unknown as { isTTY?: unknown }).isTTY;
         }
     });
 
@@ -103,6 +118,17 @@ describe('spawnWithTerminalGuard', () => {
         mockSpawnWithAbort.mockRejectedValue(error);
 
         await expect(spawnWithTerminalGuard(dummyOptions)).rejects.toThrow(error);
+    });
+
+    it('preserves piped stdin: pauses without destroying, then resumes', async () => {
+        setStdinIsTTY(undefined);
+        mockSpawnWithAbort.mockResolvedValue();
+
+        await spawnWithTerminalGuard(dummyOptions);
+
+        expect(stdinPauseSpy).toHaveBeenCalledOnce();
+        expect(stdinDestroySpy).not.toHaveBeenCalled();
+        expect(stdinResumeSpy).toHaveBeenCalledOnce();
     });
 
     it('releases stdin before spawn, and resumes after spawn', async () => {
