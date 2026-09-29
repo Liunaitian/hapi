@@ -41,7 +41,17 @@ export async function findKimiResumeTargetSessionId(
         // Unfiltered listing: the server-side machineId filter uses exact
         // equality and would drop rows whose metadata lost machineId.
         const sessions = await api.listResumableSessions();
-        return pickKimiResumeTarget(sessions, opts);
+        const hit = pickKimiResumeTarget(sessions, opts);
+        if (!hit) {
+            const candidates = sessions
+                .filter((s) => s.flavor === 'kimi' && s.agentSessionId === opts.resumeSessionId)
+                .map((s) => `${s.sessionId}(active=${s.active},machine=${s.machineId ?? 'none'})`);
+            logger.debug(
+                `[kimi] Resume lookup found no adoptable row for ${opts.resumeSessionId}: `
+                + `${sessions.length} resumable session(s), matching candidates: [${candidates.join(', ')}]`
+            );
+        }
+        return hit;
     } catch (error) {
         logger.debug('[kimi] Resume target lookup failed; falling back to a new hub session', error);
         return undefined;
