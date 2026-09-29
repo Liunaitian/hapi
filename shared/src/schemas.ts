@@ -134,6 +134,12 @@ export const MetadataSchema = z.object({
     // Set only after a completed fresh-session clear. The source row remains
     // archived; web clients use this durable link to follow the replacement.
     supersededBySessionId: z.string().optional(),
+    // A successful /resume in an attached Codex terminal. This is a view
+    // transition, not supersession: both project histories remain independent.
+    codexTerminalResume: z.object({
+        eventId: z.string().min(1),
+        targetSessionId: z.string().min(1)
+    }).optional(),
     // Durable in-progress state for runner-backed OpenCode /clear.
     opencodeClearOperation: OpencodeClearOperationSchema.optional(),
     preferredPermissionMode: PermissionModeSchema.optional(),

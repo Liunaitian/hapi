@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { AgentState, Metadata } from '@/api/types';
 import type { ApiSessionClient } from '@/api/apiSession';
@@ -23,7 +24,7 @@ class MockSession {
     updateMetadata(fn: (m: Metadata) => Metadata) { this.metadata = fn(this.metadata); }
     updateAgentState(fn: (s: AgentState) => AgentState) { this.state = fn(this.state); }
     onUserMessage(fn: MockSession['user']) { this.user = fn; }
-    onCancelQueuedMessage() {} onRetryQueuedMessage() {} onReconnect() {}
+    onCancelQueuedMessage() {} onRetryQueuedMessage() {} onReconnect() {} on() {}
     sendUserMessage(text: string) { this.messages.push({ user: text }); }
     sendAgentMessage(body: unknown) { this.messages.push(body); }
     sendSessionEvent(body: unknown) { this.messages.push(body); }
@@ -49,7 +50,7 @@ vi.mock('../utils/buildHapiMcpBridge', () => ({ buildHapiMcpBridge: async () => 
 describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Codex shared runtime', () => {
     afterEach(() => { vi.unstubAllEnvs(); state.sessions.clear(); state.beforeBootstrap = undefined; });
     it('rejects a child ID before creating a HAPI binding or calling native resume', async () => {
-        const home = await mkdtemp('/tmp/hapi-shared-child-'); state.home = home;
+        const home = await mkdtemp(join(tmpdir(), 'hapi-shared-child-')); state.home = home;
         const ch = join(home, 'codex'); await mkdir(ch);
         await writeFile(join(ch, 'config.toml'), 'model = "mock-model"\nmodel_provider = "mock"\n[model_providers.mock]\nname = "No model calls"\nbase_url = "http://127.0.0.1:1/v1"\nwire_api = "responses"\nrequires_openai_auth = false\n[analytics]\nenabled = false\n[feedback]\nenabled = false\n');
         vi.stubEnv('CODEX_HOME', ch); vi.stubEnv('HOME', home);
@@ -72,7 +73,7 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Code
         } finally { requests.mockRestore(); await rm(home, { recursive: true, force: true }); }
     }, 30_000);
     it.each(['abort', 'failure'])('cleans up the native engine and partial roots on startup %s', async outcome => {
-        const home = await mkdtemp('/tmp/hapi-shared-startup-'); state.home = home;
+        const home = await mkdtemp(join(tmpdir(), 'hapi-shared-startup-')); state.home = home;
         const ch = join(home, 'codex'); await mkdir(ch);
         await writeFile(join(ch, 'config.toml'), 'model = "mock-model"\nmodel_provider = "mock"\n[model_providers.mock]\nname = "No model calls"\nbase_url = "http://127.0.0.1:1/v1"\nwire_api = "responses"\nrequires_openai_auth = false\n[analytics]\nenabled = false\n[feedback]\nenabled = false\n');
         vi.stubEnv('CODEX_HOME', ch); vi.stubEnv('HOME', home);
@@ -98,7 +99,7 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Code
         } finally { release(); abort.abort(); await running.catch(() => {}); await rm(home, { recursive: true, force: true }); }
     }, 30_000);
     it('binds empty roots, exchanges messages, isolates /new, and archives only the selected root', async () => {
-        const home = await mkdtemp('/tmp/hapi-shared-test-'); state.home = home;
+        const home = await mkdtemp(join(tmpdir(), 'hapi-shared-test-')); state.home = home;
         const ch = join(home, 'codex'); const cwd = join(home, 'work'); await mkdir(ch); await mkdir(cwd);
         const modelRequests: unknown[] = [];
         const http = createServer((request, response) => {
@@ -117,7 +118,7 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Code
         });
         await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
         const port = (http.address() as { port: number }).port;
-        await writeFile(join(ch, 'config.toml'), `model = "mock-model"\nmodel_provider = "mock_provider"\napproval_policy = "never"\nsandbox_mode = "read-only"\ncheck_for_update_on_startup = false\n[model_providers.mock_provider]\nname = "Isolated mock"\nbase_url = "http://127.0.0.1:${port}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n[analytics]\nenabled = false\n[feedback]\nenabled = false\n[projects."${cwd}"]\ntrust_level = "trusted"\n`);
+        await writeFile(join(ch, 'config.toml'), `model = "mock-model"\nmodel_provider = "mock_provider"\napproval_policy = "never"\nsandbox_mode = "read-only"\ncheck_for_update_on_startup = false\n[model_providers.mock_provider]\nname = "Isolated mock"\nbase_url = "http://127.0.0.1:${port}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n[analytics]\nenabled = false\n[feedback]\nenabled = false\n[projects.${JSON.stringify(cwd)}]\ntrust_level = "trusted"\n`);
         vi.stubEnv('CODEX_HOME', ch); vi.stubEnv('HOME', home); vi.stubEnv('HAPI_SESSION_ID', 'parent-must-not-leak');
         const { runSharedRuntime } = await import('./runtime');
         let ready!: (value: import('./runtime').RuntimeReady) => void;
@@ -166,6 +167,83 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Code
             }
             abort.abort(); await running.catch(() => {});
             await Promise.all(clients.map(client => client.disconnect()));
+            await new Promise<void>(resolve => http.close(() => resolve()));
+            await rm(home, { recursive: true, force: true, maxRetries: 3 });
+        }
+    }, 60_000);
+
+    it('imports a terminal-selected native project with its history and keeps both roots isolated', async () => {
+        const home = await mkdtemp(join(tmpdir(), 'hapi-shared-resume-')); state.home = home;
+        const ch = join(home, 'codex'); const cwd = join(home, 'launcher'); const project = join(home, 'project');
+        await Promise.all([ch, cwd, project].map(path => mkdir(path)));
+        const http = createServer((request, response) => {
+            request.resume();
+            request.on('end', () => {
+                if (!request.url?.endsWith('/responses')) { response.writeHead(404).end(); return; }
+                const id = randomUUID();
+                const events = [{ type: 'response.created', response: { id } },
+                    { type: 'response.output_item.done', item: { type: 'message', role: 'assistant', id: `msg_${id}`, content: [{ type: 'output_text', text: 'PROJECT HISTORY ANSWER' }] } },
+                    { type: 'response.completed', response: { id, usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 } } }];
+                response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+                response.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''));
+            });
+        });
+        await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+        const port = (http.address() as { port: number }).port;
+        await writeFile(join(ch, 'config.toml'), `model = "mock-model"\nmodel_provider = "mock"\napproval_policy = "never"\nsandbox_mode = "read-only"\n[model_providers.mock]\nname = "Isolated mock"\nbase_url = "http://127.0.0.1:${port}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\n[analytics]\nenabled = false\n[feedback]\nenabled = false\n`);
+        vi.stubEnv('CODEX_HOME', ch);
+        const seed = new CodexAppServerClient({ cwd: project });
+        const abort = new AbortController();
+        let running: Promise<void> | undefined; let terminal: CodexAppServerClient | undefined;
+        try {
+            await initializeSharedClient(seed);
+            const created = record(await seed.request('thread/start', { cwd: project }));
+            const threadId = String(record(created.thread).id);
+            let completed = false;
+            seed.setNotificationHandler((method, params) => { if (method === 'turn/completed' && record(params).threadId === threadId) completed = true; });
+            await seed.request('turn/start', { threadId, input: [{ type: 'text', text: 'PREEXISTING PROJECT QUESTION', text_elements: [] }] });
+            await vi.waitFor(() => expect(completed).toBe(true), { timeout: 15_000 });
+            await seed.request('thread/name/set', { threadId, name: 'Previous project' });
+            await seed.disconnect();
+
+            const { runSharedRuntime } = await import('./runtime');
+            let ready!: (value: import('./runtime').RuntimeReady) => void;
+            const readiness = new Promise<import('./runtime').RuntimeReady>(resolve => { ready = resolve; });
+            running = runSharedRuntime({ workingDirectory: cwd }, ready, abort.signal);
+            const { runtime, sessionId } = await Promise.race([readiness, running.then(() => { throw new Error('Runtime stopped before ready'); })]);
+            terminal = new CodexAppServerClient({ endpoint: runtime.endpoint, token: runtime.token });
+            await initializeSharedClient(terminal);
+            const initialThread = runtime.sessions[sessionId].threadId;
+            await terminal.request('thread/resume', { threadId: initialThread });
+            const initial = state.sessions.get(sessionId)!;
+            expect(initial.metadata.codexTerminalResume).toBeUndefined();
+            // Same lifecycle request as /resume in the already attached native TUI.
+            await terminal.request('thread/resume', { threadId });
+            const resumed = [...state.sessions.values()].find(session => session.metadata.codexSessionId === threadId)!;
+            expect(resumed).toBeDefined();
+            expect(resumed.sessionId).not.toBe(sessionId);
+            expect(resumed.messages).toContainEqual({ user: 'PREEXISTING PROJECT QUESTION' });
+            expect(resumed.messages).toContainEqual(expect.objectContaining({ type: 'message', message: 'PROJECT HISTORY ANSWER' }));
+            expect(resumed.metadata.path).toBe(project);
+            expect(resumed.metadata.name).toBe('Previous project');
+            expect(initial.metadata.codexTerminalResume?.targetSessionId).toBe(resumed.sessionId);
+            const firstSwitch = initial.metadata.codexTerminalResume?.eventId;
+            const count = resumed.messages.length;
+            await terminal.request('thread/resume', { threadId });
+            expect(state.sessions.size).toBe(2);
+            expect(resumed.messages).toHaveLength(count);
+            expect(initial.metadata.codexTerminalResume?.eventId).toBe(firstSwitch);
+            await expect(terminal.request('thread/resume', { threadId: 'missing-thread' })).rejects.toThrow();
+            expect(resumed.metadata.codexTerminalResume).toBeUndefined();
+            resumed.user?.({ content: { text: 'CONTINUE FROM PHONE' } }, 'phone-after-resume');
+            await vi.waitFor(() => expect(resumed.consumed).toContain('phone-after-resume'), { timeout: 15_000 });
+            expect(state.sessions.get(sessionId)!.messages).not.toContainEqual({ user: 'CONTINUE FROM PHONE' });
+            await terminal.request('thread/resume', { threadId: initialThread });
+            expect(resumed.metadata.codexTerminalResume?.targetSessionId).toBe(sessionId);
+            await terminal.request('thread/resume', { threadId });
+            expect(initial.metadata.codexTerminalResume?.eventId).not.toBe(firstSwitch);
+        } finally {
+            await seed.disconnect(); await terminal?.disconnect(); abort.abort(); await running?.catch(() => {});
             await new Promise<void>(resolve => http.close(() => resolve()));
             await rm(home, { recursive: true, force: true, maxRetries: 3 });
         }

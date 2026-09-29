@@ -236,6 +236,7 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
             throw error;
         }
     });
+    const terminalRoots = new Map<string, SharedCodexRoot>();
     const key = (connection: string, request: Envelope) => `${connection}:${typeof request.id}:${request.id}`;
     const before = (request: Envelope, connection: string): Promise<Envelope> => operation(async () => {
         const params = record(request.params);
@@ -247,12 +248,14 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
         if (params.history || params.path) throw new Error('Use a native thread ID to resume through HAPI');
         const threadId = string(params.threadId);
         let existing = threadId ? roots.get(threadId) : undefined;
+        let nativeCwd: string | undefined;
         if (threadId && !existing) {
             let candidate = threadId; const visited = new Set<string>();
             for (;;) {
                 if (visited.has(candidate)) throw new Error('Invalid native thread ancestry'); visited.add(candidate);
                 await withThreadOwnership(home, candidate, id, async () => {});
                 const thread = record(record(await control.request('thread/read', { threadId: candidate, includeTurns: false })).thread);
+                if (candidate === threadId) nativeCwd = string(thread.cwd);
                 const parent = string(thread.parentThreadId);
                 if (!parent) break;
                 existing = roots.get(parent);
@@ -263,7 +266,7 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
         }
         if (request.method === 'thread/resume' && existing) return { ...request, params: existing.config(params) };
         if (threadId) await withThreadOwnership(home, threadId, id, async () => {});
-        const cwd = string(params.cwd) ?? existing?.bootstrap.workingDirectory ?? launch.cwd;
+        const cwd = string(params.cwd) ?? existing?.bootstrap.workingDirectory ?? nativeCwd ?? launch.cwd;
         const root = request.method === 'thread/resume' && threadId
             ? await withThreadOwnership(home, threadId, id, async () => {
                 const root = await prepare(cwd, await findColdBinding(home, threadId));
@@ -295,6 +298,20 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
         }
         if (!response.error && ['thread/start', 'thread/resume', 'thread/fork'].includes(request.method ?? '')) {
             const threadId = string(record(record(response.result).thread).id);
+            const selected = roots.get(threadId ?? '');
+            const previous = terminalRoots.get(connection);
+            if (selected) {
+                terminalRoots.set(connection, selected);
+                // The first resume is the TUI attaching, not a user switch.
+                // Publish only after the destination is bound and its history
+                // flushed. Failed resumes and other terminals cannot retarget
+                // this connection's source session.
+                if (request.method === 'thread/resume' && previous && previous !== selected && roots.get(previous.threadId) === previous) {
+                    const event = { eventId: randomUUID(), targetSessionId: selected.session.sessionId };
+                    previous.session.updateMetadata(metadata => ({ ...metadata, codexTerminalResume: event }));
+                    await previous.session.flush();
+                }
+            }
             // Native 0.154 resume responses omit collaboration mode. Replay
             // the authoritative settings notification after the response so
             // a newly attached TUI doesn't reset a Web-selected Plan mode.
@@ -329,6 +346,7 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
         assertRunning();
         gateway = await startCodexGateway({ upstream, upstreamToken, path: process.platform === 'win32' ? undefined : join(sockets, 'clients.sock'), token,
             hooks: { before, after, disconnected: connection => {
+                terminalRoots.delete(connection);
                 for (const [key, reservation] of reservations) {
                     if (!key.startsWith(`${connection}:`)) continue;
                     reservation.root.session.sendSessionEvent({ type: 'message', message: 'Native lifecycle outcome is unknown after transport loss. Do not retry blindly; inspect the shared runtime log.' });

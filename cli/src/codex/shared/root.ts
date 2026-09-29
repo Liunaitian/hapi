@@ -202,6 +202,8 @@ export class SharedCodexRoot {
                 [id, { ...request, completedAt: Date.now(), status: 'canceled' as const }])) }
         }));
         if (subscribe) response = record(await this.client.request('thread/resume', { threadId }));
+        const name = string(record(response.thread).name);
+        if (name) this.session.updateMetadata(metadata => metadata.name?.trim() ? metadata : { ...metadata, name });
         this.acceptSettings(response); this.acceptSettings(this.host.settingsFor(threadId) ?? {});
         await this.projection.history(response.thread); await this.refresh(); await this.refreshChildren(true);
     }

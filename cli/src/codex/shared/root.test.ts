@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { AgentState, Metadata } from '@/api/types';
 import type { SessionBootstrapResult } from '@/agent/sessionFactory';
@@ -54,7 +56,7 @@ afterEach(async () => {
 });
 
 async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) {
-    const directory = await mkdtemp('/tmp/hapi-shared-root-');
+    const directory = await mkdtemp(join(tmpdir(), 'hapi-shared-root-'));
     let state: AgentState = { steeringActive: true };
     let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex' };
     let reconnect: (() => void) | null = null;

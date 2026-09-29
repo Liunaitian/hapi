@@ -37,6 +37,12 @@ on execution exit rather than applying the legacy session-end queue sweep.
 - `/new`, `/clear`: create a new root/HAPI session. Other clients remain on the old root.
 - Native `/resume` and `/fork`: bind the selected/new root before exposing the
   lifecycle reply. One HAPI identity is never retargeted to a different thread.
+- After `hapi codex`, native `/resume` imports the selected project's saved
+  history and name and preserves its working directory unless explicitly
+  overridden. A Web/PWA chat already viewing that terminal's previous session
+  follows a successful `/resume` to the selected project. Drafts remain in
+  their original project. Opening an old session later does not replay a past
+  switch, and failed resumes do not move the phone view.
 - Web/mobile `/new` and `/clear`: only the initiating view follows the returned
   session ID. No global superseded-session redirect.
 - Navigating to a thread owned by another live execution is rejected with a

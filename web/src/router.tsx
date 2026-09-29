@@ -56,6 +56,7 @@ import { useSelectedSessionSeen } from '@/hooks/useSelectedSessionSeen'
 import { useSessionBrowserTitle } from '@/hooks/useSessionBrowserTitle'
 import { clearCodexImportedSession } from '@/lib/codexImportedSessions'
 import { getSupersedingSessionId, prepareFollowSupersedingSession, shouldFollowSupersedingSession } from '@/routes/sessions/followSupersedingSession'
+import { getCodexTerminalResumeTarget, type ObservedTerminalResume } from '@/routes/sessions/followCodexTerminalResume'
 import { migrateSuppressedSendError } from '@/lib/suppressed-send-error'
 import FilesPage from '@/routes/sessions/files'
 import FilePage from '@/routes/sessions/file'
@@ -848,6 +849,19 @@ function SessionDetailRoute() {
     const basePath = `/sessions/${sessionId}`
     const isChat = pathname === basePath || pathname === `${basePath}/`
     const supersedingSessionId = getSupersedingSessionId(sessionId, session?.metadata)
+    const observedTerminalResume = useRef<ObservedTerminalResume | null>(null)
+    useEffect(() => {
+        if (!session || session.id !== sessionId) return
+        const event = session.metadata?.codexTerminalResume
+        const target = getCodexTerminalResumeTarget(observedTerminalResume.current, sessionId, event)
+        observedTerminalResume.current = { sessionId, eventId: event?.eventId ?? null }
+        if (!target || !isChat || session.metadata?.flavor !== 'codex') return
+        // Leave drafts and uploads attached to their original project.
+        navigate({
+            to: '/sessions/$sessionId', params: { sessionId: target }, replace: true,
+            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+        })
+    }, [navigate, session, sessionId, isChat])
     const observedSessionRef = useRef<{
         sessionId: string
         supersedingSessionId: string | null
